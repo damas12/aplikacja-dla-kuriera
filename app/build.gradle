@@ -1,0 +1,32 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'pl.kurierradar.app'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'pl.kurierradar.app'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Bundled Latin OCR model: works locally after installation, no ChatGPT/API needed.
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+}
