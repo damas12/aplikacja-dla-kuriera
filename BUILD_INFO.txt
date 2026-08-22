@@ -1,0 +1,8 @@
+Kurier Radar 0.2
+Package: pl.kurierradar.app
+Min Android: 8.0 (API 26)
+Target/compile SDK: 36
+Java: 17
+OCR: com.google.mlkit:text-recognition:16.0.1 (bundled Latin model)
+Map UI: Leaflet 1.9.4 + leaflet.heat 0.2.0 loaded over HTTPS; tiles: OpenStreetMap
+No ChatGPT/OpenAI API is used by the app.
