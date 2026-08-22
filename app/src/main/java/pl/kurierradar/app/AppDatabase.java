@@ -47,7 +47,36 @@ public class AppDatabase extends SQLiteOpenHelper {
     }
 
     public boolean insertDelivery(ParsedDelivery d) {
+        SQLiteDatabase db = getWritableDatabase();
         LocationMatch match = nearestLocation(d.timestampMs, 10 * 60 * 1000L);
+
+        // The same Uber order can appear on more than one screenshot. One screenshot may
+        // contain the fare/time card but not the restaurant name, while another one shows it.
+        // Match the core order fields first so a later, better screenshot enriches the row
+        // instead of creating a duplicate.
+        try (Cursor c = db.rawQuery(
+                "SELECT id,restaurant,pickup,dropoff,duration_min,lat,lon FROM deliveries " +
+                "WHERE platform=? AND ts=? AND ABS(amount-?)<0.011 AND ABS(COALESCE(distance_km,0)-?)<0.031 LIMIT 1",
+                new String[]{d.platform, Long.toString(d.timestampMs), Double.toString(d.amount), Double.toString(d.distanceKm)})) {
+            if (c.moveToFirst()) {
+                long id = c.getLong(0);
+                String oldRestaurant = safe(c,1), oldPickup = safe(c,2), oldDropoff = safe(c,3);
+                double oldDuration = c.isNull(4) ? 0.0 : c.getDouble(4);
+                ContentValues up = new ContentValues();
+
+                if (isUnknownRestaurant(oldRestaurant) && !isUnknownRestaurant(d.restaurant)) up.put("restaurant", d.restaurant);
+                if ((oldPickup == null || oldPickup.trim().isEmpty()) && d.pickup != null && !d.pickup.trim().isEmpty()) up.put("pickup", d.pickup);
+                if ((oldDropoff == null || oldDropoff.trim().isEmpty()) && d.dropoff != null && !d.dropoff.trim().isEmpty()) up.put("dropoff", d.dropoff);
+                if (oldDuration <= 0 && d.durationMin > 0) up.put("duration_min", d.durationMin);
+                if ((c.isNull(5) || c.isNull(6)) && match != null) {
+                    up.put("lat", match.lat); up.put("lon", match.lon); up.put("match_gap_sec", match.gapMs / 1000L);
+                }
+                if (d.raw != null && !d.raw.isEmpty()) up.put("raw", d.raw);
+                if (up.size() > 0) db.update("deliveries", up, "id=?", new String[]{Long.toString(id)});
+                return false;
+            }
+        }
+
         ContentValues cv = new ContentValues();
         cv.put("platform", d.platform);
         cv.put("ts", d.timestampMs);
@@ -65,8 +94,14 @@ public class AppDatabase extends SQLiteOpenHelper {
         cv.put("source_key", d.sourceKey());
         cv.put("raw", d.raw);
         cv.put("created_ts", System.currentTimeMillis());
-        long id = getWritableDatabase().insertWithOnConflict("deliveries", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
+        long id = db.insertWithOnConflict("deliveries", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
         return id != -1;
+    }
+
+    private static boolean isUnknownRestaurant(String s) {
+        if (s == null) return true;
+        String n = s.trim().toLowerCase(Locale.ROOT);
+        return n.isEmpty() || n.equals("uber eats") || n.equals("niezidentyfikowano") || n.equals("nieznane");
     }
 
     public int countDeliveries() { return scalarInt("SELECT COUNT(*) FROM deliveries"); }

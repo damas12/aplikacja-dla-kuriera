@@ -79,8 +79,20 @@
 
     <section id="analysis" class="page">
       <div class="card">
-        <div class="row between"><div><div class="title">Dzień × godzina</div><div class="small muted">Średnia kwota zlecenia. Liczba w nawiasie = próba.</div></div><div class="row"><select id="gridPlatform"><option value="ALL">Wszystkie</option><option value="WOLT">Wolt</option><option value="UBER">Uber</option></select><select id="gridMonth"><option value="ALL">Wszystkie miesiące</option></select></div></div>
+        <div class="row between"><div><div class="title">Dzień × godzina</div><div class="small muted">Średnia kwota zlecenia. Liczba w nawiasie = próba.</div></div><div class="row"><select id="gridPlatform"><option value="ALL">Wszystkie</option><option value="WOLT">Wolt</option><option value="UBER">Uber</option></select><select id="gridMonth"><option value="ALL">Wszystkie miesiące</option></select><select id="gridWeek"><option value="ALL">Wszystkie tygodnie</option></select></div></div>
         <div class="gridScroll"><table id="hourGrid" class="hourGrid"></table></div>
+      </div>
+      <div class="card">
+        <div class="title">Podsumowanie wybranego okresu</div>
+        <div class="small muted" id="periodLabel">Wybierz miesiąc lub tydzień powyżej.</div>
+        <div class="stats">
+          <div class="stat"><div id="pRevenue" class="v">0 zł</div><div class="k">przychód</div></div>
+          <div class="stat"><div id="pOrders" class="v">0</div><div class="k">zleceń</div></div>
+          <div class="stat"><div id="pHours" class="v">—</div><div class="k">czas pracy</div></div>
+          <div class="stat"><div id="pZph" class="v">—</div><div class="k">zł / godzinę</div></div>
+          <div class="stat"><div id="pAvg" class="v">0 zł</div><div class="k">średnio / zlecenie</div></div>
+          <div class="stat"><div id="pZpk" class="v">0</div><div class="k">średnio zł/km</div></div>
+        </div>
       </div>
       <div class="card">
         <div class="row between"><div><div class="title">Każdy dzień osobno</div><div class="small muted">Czas pracy jest liczony z przycisków Start zmiany → Zakończ zmianę. Wolt + Uber są łączone w jeden wynik dnia.</div></div><select id="analysisDay"></select></div>
@@ -101,7 +113,7 @@
     </section>
 
     <section id="restaurants" class="page">
-      <div class="card"><div class="row between"><div class="title">Ranking restauracji</div><span class="badge">min. 1 zlecenie</span></div><div style="overflow:auto"><table class="table"><thead><tr><th>Restauracja</th><th>#</th><th>Śr. zł</th><th>zł/km</th></tr></thead><tbody id="restaurantRows"></tbody></table></div></div>
+      <div class="card"><div class="row between"><div><div class="title">Ranking restauracji</div><div class="small muted">Ranking ogólny nie zgaduje czasu Wolta. Kolejność opiera się głównie na zł/km, a przy podobnym wyniku na średniej kwocie zlecenia.</div></div><span class="badge">sort: zł/km</span></div><div style="overflow:auto"><table class="table"><thead><tr><th>Restauracja</th><th>#</th><th>Śr. zł</th><th>zł/km</th><th>Śr. min*</th><th>zł/h*</th></tr></thead><tbody id="restaurantRows"></tbody></table></div><div class="small muted" style="margin-top:9px">* Czas i zł/h są liczone wyłącznie z zamówień, dla których platforma podała rzeczywisty czas dostawy — obecnie głównie Uber. Dla Wolta bez czasu aplikacja pokazuje „—” zamiast szacować.</div></div>
     </section>
 
     <section id="history" class="page">
@@ -148,6 +160,47 @@ function populateMonthFilters(){
     sel.innerHTML=`<option value="ALL">${first}</option>`+months.map(k=>`<option value="${k}">${monthLabel(k)}</option>`).join('');
     sel.value=months.includes(prev)||prev==='ALL'?prev:'ALL';
   }
+  populateWeekFilter();
+}
+function populateWeekFilter(){
+  const sel=$('gridWeek'); if(!sel)return;
+  const mk=$('gridMonth')?.value||'ALL',prev=sel.value||'ALL';
+  if(mk==='ALL'){sel.innerHTML='<option value="ALL">Wszystkie tygodnie</option>';sel.value='ALL';sel.disabled=true;return}
+  const [y,m]=mk.split('-').map(Number),last=new Date(y,m,0).getDate();
+  const ranges=[];for(let a=1;a<=last;a+=7)ranges.push([a,Math.min(a+6,last)]);
+  sel.innerHTML='<option value="ALL">Cały miesiąc</option>'+ranges.map(([a,b])=>`<option value="${a}-${b}">${a}–${b} ${new Date(y,m-1,1).toLocaleDateString('pl-PL',{month:'long'})}</option>`).join('');
+  sel.disabled=false;
+  sel.value=[...sel.options].some(o=>o.value===prev)?prev:'ALL';
+}
+function weekMatch(dt,value){
+  if(!value||value==='ALL')return true;const [a,b]=value.split('-').map(Number);return dt.getDate()>=a&&dt.getDate()<=b;
+}
+function selectedPeriodData(){
+  const pf=$('gridPlatform').value,mk=$('gridMonth').value,wk=$('gridWeek').value;
+  return deliveries.filter(d=>{const dt=dateObj(d.ts);return (pf==='ALL'||d.platform===pf)&&(mk==='ALL'||monthKey(dt)===mk)&&weekMatch(dt,wk)});
+}
+function periodBounds(){
+  const mk=$('gridMonth').value,wk=$('gridWeek').value;
+  if(mk==='ALL')return null;
+  const [y,m]=mk.split('-').map(Number);let a=1,b=new Date(y,m,0).getDate();
+  if(wk!=='ALL')[a,b]=wk.split('-').map(Number);
+  return {start:new Date(y,m-1,a,0,0,0,0).getTime(),end:new Date(y,m-1,b+1,0,0,0,0).getTime(),a,b,y,m};
+}
+function workMsForRange(start,end){
+  let total=0,now=Date.now();for(const sh of shifts){const a=+sh.startTs||0,b=sh.endTs==null?now:(+sh.endTs||0);if(!a||!b||b<=a)continue;const x=Math.max(a,start),y=Math.min(b,end);if(y>x)total+=y-x}return total;
+}
+function renderPeriodSummary(data){
+  data=data||selectedPeriodData();const rev=data.reduce((a,d)=>a+(+d.amount||0),0),dist=data.reduce((a,d)=>a+(+d.distanceKm||0),0),n=data.length;
+  const bounds=periodBounds();let workMs=0,label='Cała historia';
+  if(bounds){workMs=workMsForRange(bounds.start,bounds.end);const first=new Date(bounds.start),last=new Date(bounds.end-1);label=bounds.a===1&&bounds.b===new Date(bounds.y,bounds.m,0).getDate()?monthLabel($('gridMonth').value):`${first.toLocaleDateString('pl-PL',{day:'numeric',month:'long'})} – ${last.toLocaleDateString('pl-PL',{day:'numeric',month:'long',year:'numeric'})}`}
+  $('periodLabel').textContent=`${label} · ${$('gridPlatform').value==='ALL'?'Wolt + Uber':$('gridPlatform').value}`;
+  $('pRevenue').textContent=money(rev);$('pOrders').textContent=n;$('pAvg').textContent=money(n?rev/n:0);$('pZpk').textContent=num(dist?rev/dist:0,2);
+  $('pHours').textContent=workMs>0?durationLabel(workMs):'—';$('pZph').textContent=workMs>0?money(rev/(workMs/3600000)):'—';
+}
+function normalizeRestaurantName(d){
+  let n=(d.restaurant||d.pickup||'').trim();const low=n.toLowerCase();
+  if(!n||low==='uber eats'||low==='nieznane'||low==='niezidentyfikowano'||low==='wolt')return 'Niezidentyfikowano';
+  return n;
 }
 
 function groupedDays(){
@@ -311,7 +364,7 @@ function renderZones(data){
   el.querySelectorAll('.zoneGo').forEach(b=>b.addEventListener('click',()=>{map&&map.setView([+b.dataset.lat,+b.dataset.lon],15)}));
 }
 function renderHourGrid(){
-  const pf=$('gridPlatform').value, mk=$('gridMonth').value; const data=deliveries.filter(d=>(pf==='ALL'||d.platform===pf)&&(mk==='ALL'||monthKey(dateObj(d.ts))===mk));
+  const data=selectedPeriodData();
   const days=['Nd','Pn','Wt','Śr','Cz','Pt','Sb']; const hours=[10,11,12,13,14,15,16,17,18,19,20,21,22,23];
   const cells={}; let globalMax=0;
   data.forEach(d=>{let dt=dateObj(d.ts),k=dt.getDay()+'-'+dt.getHours();let c=cells[k]||(cells[k]={n:0,sum:0});c.n++;c.sum+=+d.amount||0});
@@ -319,6 +372,7 @@ function renderHourGrid(){
   let h='<tr><th></th>'+hours.map(x=>`<th>${x}</th>`).join('')+'</tr>';
   [1,2,3,4,5,6,0].forEach(day=>{h+=`<tr><th>${days[day]}</th>`;hours.forEach(hr=>{const c=cells[day+'-'+hr];if(!c){h+='<td>–</td>'}else{let av=c.sum/c.n,alpha=.12+.72*(av/(globalMax||1));h+=`<td style="background:rgba(34,197,94,${alpha.toFixed(2)});color:#fff" title="${money(av)}, ${c.n} zleceń">${Math.round(av)}<br><span style="opacity:.7">(${c.n})</span></td>`}});h+='</tr>'});
   $('hourGrid').innerHTML=h;
+  renderPeriodSummary(data);
   renderInsights(data);
 }
 function renderMonthTable(){
@@ -344,9 +398,40 @@ function renderInsights(data){
   el.innerHTML=arr.join('')||'<div class="empty">Za mała próba do wniosków.</div>';
 }
 function renderRestaurants(){
-  const m=new Map(); deliveries.forEach(d=>{let name=(d.restaurant||d.pickup||'Nieznane').trim();let x=m.get(name)||{n:0,sum:0,dist:0};x.n++;x.sum+=+d.amount||0;x.dist+=+d.distanceKm||0;m.set(name,x)});
-  const rows=[...m].sort((a,b)=>((b[1].dist?b[1].sum/b[1].dist:0)*Math.log2(b[1].n+1))-((a[1].dist?a[1].sum/a[1].dist:0)*Math.log2(a[1].n+1)));
-  $('restaurantRows').innerHTML=rows.length?rows.map(([n,x])=>`<tr><td><b>${escapeHtml(n)}</b></td><td>${x.n}</td><td>${money(x.sum/x.n)}</td><td>${num(x.dist?x.sum/x.dist:0,2)}</td></tr>`).join(''):'<tr><td colspan="4" class="muted">Brak danych</td></tr>';
+  const m=new Map();
+  deliveries.forEach(d=>{
+    const name=normalizeRestaurantName(d);
+    let x=m.get(name)||{n:0,sum:0,dist:0,timeN:0,timeMin:0,timeRev:0};
+    x.n++;
+    x.sum+=+d.amount||0;
+    x.dist+=+d.distanceKm||0;
+
+    // Nie szacujemy czasu dla Wolta. Do statystyk czasowych trafiają tylko
+    // zlecenia z rzeczywistym czasem dostawy odczytanym ze screena (obecnie Uber).
+    const mins=+d.durationMin||0;
+    if(d.platform==='UBER' && mins>0){
+      x.timeN++;
+      x.timeMin+=mins;
+      x.timeRev+=+d.amount||0;
+    }
+    m.set(name,x);
+  });
+
+  const rows=[...m].map(([n,x])=>{
+    x.avg=x.n?x.sum/x.n:0;
+    x.zpk=x.dist?x.sum/x.dist:0;
+    x.zph=x.timeMin>0?x.timeRev/(x.timeMin/60):0;
+    x.avgMin=x.timeN?x.timeMin/x.timeN:0;
+    return [n,x];
+  }).sort((a,b)=>{
+    // Ranking wspólny: bez wymyślania czasu dla Wolta.
+    // Najpierw zł/km, a przy bardzo podobnym wyniku średnia kwota.
+    const dz=b[1].zpk-a[1].zpk;
+    if(Math.abs(dz)>0.05)return dz;
+    return b[1].avg-a[1].avg;
+  });
+
+  $('restaurantRows').innerHTML=rows.length?rows.map(([n,x])=>`<tr><td><b>${escapeHtml(n)}</b>${n==='Niezidentyfikowano'?'<div class="small muted">dodaj później screen z nazwą — rekord zostanie uzupełniony</div>':''}</td><td>${x.n}</td><td>${money(x.avg)}</td><td>${num(x.zpk,2)}</td><td>${x.timeN>0?num(x.avgMin,1):'—'}</td><td><b>${x.timeN>0?money(x.zph)+'/h':'—'}</b>${x.timeN>0&&x.timeN<x.n?`<div class="small muted">${x.timeN}/${x.n} z czasem</div>`:''}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">Brak danych</td></tr>';
 }
 function renderHistory(){
   const list=$('historyList'); if(!deliveries.length){list.innerHTML='<div class="empty">Nie zaimportowano jeszcze żadnych zleceń.</div>';return}
@@ -354,7 +439,7 @@ function renderHistory(){
     const dt=dateObj(d.ts);
     const perKm=zpk(d);
     const perKmText=perKm>0?`${num(perKm,2)} zł/km`:'— zł/km';
-    return `<div class="historyItem"><div class="row between"><div class="grow"><span class="platform ${d.platform}">${d.platform}</span> <b>${escapeHtml(d.restaurant||'Zlecenie')}</b><div class="small muted">${dt.toLocaleDateString('pl-PL')} ${dt.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'})} · ${num(d.distanceKm,2)} km${d.lat==null?' · brak GPS':''}</div></div><div style="text-align:right;min-width:92px"><div class="badge green" style="margin-bottom:5px">${perKmText}</div><div class="money">${money(d.amount)}</div></div></div></div>`
+    return `<div class="historyItem"><div class="row between"><div class="grow"><span class="platform ${d.platform}">${d.platform}</span> <b>${escapeHtml(normalizeRestaurantName(d))}</b><div class="small muted">${dt.toLocaleDateString('pl-PL')} ${dt.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'})} · ${num(d.distanceKm,2)} km${d.lat==null?' · brak GPS':''}</div></div><div style="text-align:right;min-width:92px"><div class="badge green" style="margin-bottom:5px">${perKmText}</div><div class="money">${money(d.amount)}</div></div></div></div>`
   }).join('');
 }
 function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -369,7 +454,8 @@ $('batteryBtn').addEventListener('click',()=>hasAndroid()&&Android.openBatterySe
 $('clearBtn').addEventListener('click',()=>{if(confirm('Usunąć wszystkie dostawy i historię GPS? Tego nie da się cofnąć.')){hasAndroid()&&Android.clearAll()}});
 ['fPlatform','fDay','fMonth','fHour','fMetric'].forEach(id=>$(id).addEventListener('change',renderMap));
 $('gridPlatform').addEventListener('change',()=>{renderHourGrid();renderMonthTable()});
-$('gridMonth').addEventListener('change',renderHourGrid);
+$('gridMonth').addEventListener('change',()=>{populateWeekFilter();renderHourGrid()});
+$('gridWeek').addEventListener('change',renderHourGrid);
 $('homeDay').addEventListener('change',()=>{preferredHomeDay=$('homeDay').value;renderDaySummary()});
 $('analysisDay').addEventListener('change',renderDailyAnalysis);
 document.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nav button').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===b.dataset.page));if(b.dataset.page==='mapPage'&&map)setTimeout(()=>map.invalidateSize(),80)}));

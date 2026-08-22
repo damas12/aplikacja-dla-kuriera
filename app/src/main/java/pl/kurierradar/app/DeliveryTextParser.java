@@ -132,7 +132,7 @@ public final class DeliveryTextParser {
             ParsedDelivery d = new ParsedDelivery();
             d.platform = "UBER";
             d.timestampMs = toMillis(date, timeR.time);
-            d.restaurant = pickup.isEmpty() ? "Uber Eats" : pickup;
+            d.restaurant = pickup.isEmpty() ? "Niezidentyfikowano" : pickup;
             d.pickup = pickup;
             d.dropoff = dropoff;
             d.amount = amountR.value;

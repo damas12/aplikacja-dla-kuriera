@@ -194,7 +194,7 @@ public class MainActivity extends Activity {
             db.clearAll();
             sendToWeb("window.refreshAll && window.refreshAll();");
         }
-        @JavascriptInterface public String appVersion() { return "0.6.0"; }
+        @JavascriptInterface public String appVersion() { return "0.8.0"; }
     }
 
     private static class ImportSummary {

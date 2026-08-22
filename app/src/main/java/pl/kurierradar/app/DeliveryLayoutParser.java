@@ -212,7 +212,7 @@ public final class DeliveryLayoutParser {
             ParsedDelivery d = new ParsedDelivery();
             d.platform = "UBER";
             d.timestampMs = toMillis(date, time);
-            d.restaurant = pickup.isEmpty() ? "Uber Eats" : pickup;
+            d.restaurant = pickup.isEmpty() ? "Niezidentyfikowano" : pickup;
             d.pickup = pickup;
             d.dropoff = dropoff;
             d.amount = amount;
