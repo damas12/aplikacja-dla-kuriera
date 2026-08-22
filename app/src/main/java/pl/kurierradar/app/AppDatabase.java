@@ -103,6 +103,23 @@ public class AppDatabase extends SQLiteOpenHelper {
         return arr.toString();
     }
 
+    public String getShiftsJson() {
+        JSONArray arr = new JSONArray();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT id,start_ts,end_ts FROM shifts ORDER BY start_ts DESC", null)) {
+            while (c.moveToNext()) {
+                JSONObject o = new JSONObject();
+                try {
+                    o.put("id", c.getLong(0));
+                    o.put("startTs", c.getLong(1));
+                    if (!c.isNull(2)) o.put("endTs", c.getLong(2)); else o.put("endTs", JSONObject.NULL);
+                    arr.put(o);
+                } catch (JSONException ignored) {}
+            }
+        }
+        return arr.toString();
+    }
+
     public String getStatusJson(boolean tracking) {
         JSONObject o = new JSONObject();
         try {

@@ -183,6 +183,7 @@ public class MainActivity extends Activity {
 
     public class Bridge {
         @JavascriptInterface public String getDeliveries() { return db.getDeliveriesJson(); }
+        @JavascriptInterface public String getShifts() { return db.getShiftsJson(); }
         @JavascriptInterface public String getStatus() { return db.getStatusJson(LocationTrackingService.isRunning); }
         @JavascriptInterface public void startTracking() { runOnUiThread(MainActivity.this::startTrackingFlow); }
         @JavascriptInterface public void stopTracking() { runOnUiThread(MainActivity.this::stopTracking); }
@@ -193,7 +194,7 @@ public class MainActivity extends Activity {
             db.clearAll();
             sendToWeb("window.refreshAll && window.refreshAll();");
         }
-        @JavascriptInterface public String appVersion() { return "0.3.0"; }
+        @JavascriptInterface public String appVersion() { return "0.6.0"; }
     }
 
     private static class ImportSummary {
