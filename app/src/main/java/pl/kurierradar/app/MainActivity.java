@@ -137,7 +137,7 @@ public class MainActivity extends Activity {
                     .addOnSuccessListener(result -> {
                         summary.images++;
                         String raw = result.getText();
-                        List<ParsedDelivery> parsed = DeliveryTextParser.parse(raw, pendingPlatformHint);
+                        List<ParsedDelivery> parsed = DeliveryLayoutParser.parse(result, pendingPlatformHint);
                         summary.recognized += parsed.size();
                         for (ParsedDelivery d : parsed) {
                             if (db.insertDelivery(d)) summary.added++; else summary.duplicates++;
@@ -193,7 +193,7 @@ public class MainActivity extends Activity {
             db.clearAll();
             sendToWeb("window.refreshAll && window.refreshAll();");
         }
-        @JavascriptInterface public String appVersion() { return "0.1.0"; }
+        @JavascriptInterface public String appVersion() { return "0.3.0"; }
     }
 
     private static class ImportSummary {
