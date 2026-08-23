@@ -36,6 +36,7 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         db = new AppDatabase(this);
+        db.deduplicateUberOrders();
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
 
         webView = new WebView(this);
@@ -52,6 +53,22 @@ public class MainActivity extends Activity {
         webView.addJavascriptInterface(new Bridge(), "Android");
         setContentView(webView);
         webView.loadUrl("file:///android_asset/index.html");
+        recoverTrackingIfNeeded();
+    }
+
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (db != null) {
+            recoverTrackingIfNeeded();
+            if (webView != null) webView.postDelayed(this::sendStatusToWeb, 300);
+        }
+    }
+
+    private void recoverTrackingIfNeeded() {
+        if (!LocationTrackingService.isTrackingRequested(this) || LocationTrackingService.isRunning) return;
+        Intent i = new Intent(this, LocationTrackingService.class).setAction(LocationTrackingService.ACTION_START);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
     }
 
     @Override protected void onDestroy() {
@@ -123,6 +140,7 @@ public class MainActivity extends Activity {
 
     private void processScreenshots(List<Uri> uris, int index, ImportSummary summary) {
         if (index >= uris.size()) {
+            db.deduplicateUberOrders();
             summary.unmatched = db.countUnmatchedDeliveries();
             JSONObject o = summary.toJson();
             sendToWeb("window.onNativeImportResult && window.onNativeImportResult(" + o.toString() + ");");
@@ -175,7 +193,7 @@ public class MainActivity extends Activity {
     }
 
     private void sendStatusToWeb() {
-        sendToWeb("window.onNativeStatus && window.onNativeStatus(" + db.getStatusJson(LocationTrackingService.isRunning) + ");");
+        sendToWeb("window.onNativeStatus && window.onNativeStatus(" + db.getStatusJson(LocationTrackingService.isRunning, LocationTrackingService.isTrackingRequested(this)) + ");");
     }
 
     private void sendToWeb(String js) { runOnUiThread(() -> webView.evaluateJavascript(js, null)); }
@@ -184,7 +202,7 @@ public class MainActivity extends Activity {
     public class Bridge {
         @JavascriptInterface public String getDeliveries() { return db.getDeliveriesJson(); }
         @JavascriptInterface public String getShifts() { return db.getShiftsJson(); }
-        @JavascriptInterface public String getStatus() { return db.getStatusJson(LocationTrackingService.isRunning); }
+        @JavascriptInterface public String getStatus() { return db.getStatusJson(LocationTrackingService.isRunning, LocationTrackingService.isTrackingRequested(MainActivity.this)); }
         @JavascriptInterface public void startTracking() { runOnUiThread(MainActivity.this::startTrackingFlow); }
         @JavascriptInterface public void stopTracking() { runOnUiThread(MainActivity.this::stopTracking); }
         @JavascriptInterface public void pickScreenshots(String platformHint) { runOnUiThread(() -> chooseScreenshots(platformHint)); }
@@ -194,7 +212,7 @@ public class MainActivity extends Activity {
             db.clearAll();
             sendToWeb("window.refreshAll && window.refreshAll();");
         }
-        @JavascriptInterface public String appVersion() { return "0.8.0"; }
+        @JavascriptInterface public String appVersion() { return "1.0.0"; }
     }
 
     private static class ImportSummary {

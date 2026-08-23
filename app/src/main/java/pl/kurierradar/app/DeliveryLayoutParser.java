@@ -47,10 +47,31 @@ public final class DeliveryLayoutParser {
     }
 
     private static List<ParsedDelivery> mergePreferLayout(List<ParsedDelivery> layout, List<ParsedDelivery> flat) {
-        LinkedHashMap<String, ParsedDelivery> merged = new LinkedHashMap<>();
-        for (ParsedDelivery d : layout) merged.put(d.sourceKey(), d);
-        for (ParsedDelivery d : flat) merged.putIfAbsent(d.sourceKey(), d);
-        return new ArrayList<>(merged.values());
+        // The flat OCR parser is only a fallback. On Uber screenshots it may accidentally
+        // bind the phone clock or a map label to a card that the layout parser already read.
+        // De-duplicate by the stable order fields instead of restaurant/sourceKey.
+        List<ParsedDelivery> merged = new ArrayList<>();
+        merged.addAll(layout);
+        for (ParsedDelivery f : flat) {
+            boolean same = false;
+            for (ParsedDelivery d : merged) {
+                if (sameOrderOnScreenshot(d, f)) { same = true; break; }
+            }
+            if (!same) merged.add(f);
+        }
+        return merged;
+    }
+
+    private static boolean sameOrderOnScreenshot(ParsedDelivery a, ParsedDelivery b) {
+        if (a == null || b == null || !Objects.equals(a.platform, b.platform)) return false;
+        if (Math.abs(a.amount - b.amount) > 0.03) return false;
+        if (Math.abs(a.distanceKm - b.distanceKm) > 0.06) return false;
+        if (a.durationMin > 0 && b.durationMin > 0 && Math.abs(a.durationMin - b.durationMin) <= 0.20) return true;
+        long minuteA = Math.floorMod(a.timestampMs / 60000L, 24L * 60L);
+        long minuteB = Math.floorMod(b.timestampMs / 60000L, 24L * 60L);
+        long diff = Math.abs(minuteA - minuteB);
+        diff = Math.min(diff, 24L * 60L - diff);
+        return diff <= 3;
     }
 
     private static List<OcrLine> extractLines(Text result) {
@@ -283,7 +304,7 @@ public final class DeliveryLayoutParser {
         String n = normalize(s).trim();
         String l = n.toLowerCase(Locale.ROOT);
         if (l.isEmpty() || l.contains("google") || l.contains("map data") || l.contains("©")) return true;
-        if (l.equals("bydgoszcz") || l.equals("bydgoszcz, pl")) return true;
+        if (l.equals("bydgoszcz") || l.equals("bydgoszcz, pl") || l.equals("bydgosz") || l.equals("bydgosz, pl")) return true;
         if (l.contains("strona głów") || l.contains("strona glow") || l.contains("odkrywaj") || l.contains("przychód") || l.contains("przychod") || l.contains("skrzynka") || l.equals("menu")) return true;
         if (l.contains("rodzaj") || l.contains("cecha") || l.contains("kompaktowy")) return true;
         if (n.matches("^[0-9]{1,3}$")) return true;

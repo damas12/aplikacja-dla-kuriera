@@ -6,11 +6,14 @@ import android.database.sqlite.*;
 import android.location.Location;
 import org.json.*;
 
-import java.util.Locale;
+import java.util.*;
+import java.util.regex.Pattern;
 
 public class AppDatabase extends SQLiteOpenHelper {
     private static final String DB_NAME = "kurier_radar.db";
     private static final int DB_VERSION = 1;
+    private static final long DAY_MS = 24L * 60L * 60L * 1000L;
+    private static final Pattern EXPLICIT_DATE = Pattern.compile("(?i)(?<!\\d)\\d{1,2}\\s*(?:[.,-]?\\s*)?(sty|lut|mar|kwi|maj|cze|lip|sie|wrz|paź|paz|lis|gru)(?:\\s+\\d{4})?");
 
     public AppDatabase(Context context) { super(context, DB_NAME, null, DB_VERSION); }
 
@@ -34,55 +37,81 @@ public class AppDatabase extends SQLiteOpenHelper {
         getWritableDatabase().insert("locations", null, cv);
     }
 
-    public long startShift() {
-        ContentValues cv = new ContentValues();
-        cv.put("start_ts", System.currentTimeMillis());
-        return getWritableDatabase().insert("shifts", null, cv);
+    public synchronized long getOrStartActiveShift() {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long keepId = -1;
+            try (Cursor c = db.rawQuery("SELECT id FROM shifts WHERE end_ts IS NULL ORDER BY start_ts ASC", null)) {
+                if (c.moveToFirst()) keepId = c.getLong(0);
+            }
+            if (keepId > 0) {
+                // Old versions could accidentally create more than one open row after a process restart.
+                // Keep the original start and remove only the duplicate open rows.
+                db.delete("shifts", "end_ts IS NULL AND id<>?", new String[]{Long.toString(keepId)});
+                db.setTransactionSuccessful();
+                return keepId;
+            }
+            ContentValues cv = new ContentValues();
+            cv.put("start_ts", System.currentTimeMillis());
+            long id = db.insert("shifts", null, cv);
+            db.setTransactionSuccessful();
+            return id;
+        } finally {
+            db.endTransaction();
+        }
     }
 
-    public void endOpenShift() {
+    public synchronized long getActiveShiftId() {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT id FROM shifts WHERE end_ts IS NULL ORDER BY start_ts ASC LIMIT 1", null)) {
+            return c.moveToFirst() ? c.getLong(0) : -1;
+        }
+    }
+
+    public synchronized boolean hasOpenShift() { return getActiveShiftId() > 0; }
+
+    public synchronized void endActiveShift(long preferredId) {
+        SQLiteDatabase db = getWritableDatabase();
+        long id = preferredId > 0 ? preferredId : getActiveShiftId();
+        if (id <= 0) return;
         ContentValues cv = new ContentValues();
         cv.put("end_ts", System.currentTimeMillis());
-        getWritableDatabase().update("shifts", cv, "end_ts IS NULL", null);
+        db.update("shifts", cv, "id=? AND end_ts IS NULL", new String[]{Long.toString(id)});
+    }
+
+    public long getActiveShiftStartTs() {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT start_ts FROM shifts WHERE end_ts IS NULL ORDER BY start_ts ASC LIMIT 1", null)) {
+            return c.moveToFirst() ? c.getLong(0) : 0L;
+        }
+    }
+
+    public long getLastLocationTsForActiveShift() {
+        long start = getActiveShiftStartTs();
+        if (start <= 0) return 0L;
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT MAX(ts) FROM locations WHERE ts>=?", new String[]{Long.toString(start)})) {
+            return c.moveToFirst() && !c.isNull(0) ? c.getLong(0) : 0L;
+        }
     }
 
     public boolean insertDelivery(ParsedDelivery d) {
         SQLiteDatabase db = getWritableDatabase();
         LocationMatch match = nearestLocation(d.timestampMs, 10 * 60 * 1000L);
 
-        // The same Uber order can appear on more than one screenshot. One screenshot may
-        // contain the fare/time card but not the restaurant name, while another one shows it.
-        // Match the core order fields first so a later, better screenshot enriches the row
-        // instead of creating a duplicate.
-        try (Cursor c = db.rawQuery(
-                "SELECT id,restaurant,pickup,dropoff,duration_min,lat,lon FROM deliveries " +
-                "WHERE platform=? AND ts=? AND ABS(amount-?)<0.011 AND ABS(COALESCE(distance_km,0)-?)<0.031 LIMIT 1",
-                new String[]{d.platform, Long.toString(d.timestampMs), Double.toString(d.amount), Double.toString(d.distanceKm)})) {
-            if (c.moveToFirst()) {
-                long id = c.getLong(0);
-                String oldRestaurant = safe(c,1), oldPickup = safe(c,2), oldDropoff = safe(c,3);
-                double oldDuration = c.isNull(4) ? 0.0 : c.getDouble(4);
-                ContentValues up = new ContentValues();
-
-                if (isUnknownRestaurant(oldRestaurant) && !isUnknownRestaurant(d.restaurant)) up.put("restaurant", d.restaurant);
-                if ((oldPickup == null || oldPickup.trim().isEmpty()) && d.pickup != null && !d.pickup.trim().isEmpty()) up.put("pickup", d.pickup);
-                if ((oldDropoff == null || oldDropoff.trim().isEmpty()) && d.dropoff != null && !d.dropoff.trim().isEmpty()) up.put("dropoff", d.dropoff);
-                if (oldDuration <= 0 && d.durationMin > 0) up.put("duration_min", d.durationMin);
-                if ((c.isNull(5) || c.isNull(6)) && match != null) {
-                    up.put("lat", match.lat); up.put("lon", match.lon); up.put("match_gap_sec", match.gapMs / 1000L);
-                }
-                if (d.raw != null && !d.raw.isEmpty()) up.put("raw", d.raw);
-                if (up.size() > 0) db.update("deliveries", up, "id=?", new String[]{Long.toString(id)});
-                return false;
-            }
+        ExistingDelivery existing = findExistingDelivery(db, d);
+        if (existing != null) {
+            mergeIntoExisting(db, existing, d, match);
+            return false;
         }
 
         ContentValues cv = new ContentValues();
         cv.put("platform", d.platform);
         cv.put("ts", d.timestampMs);
-        cv.put("restaurant", d.restaurant);
-        cv.put("pickup", d.pickup);
-        cv.put("dropoff", d.dropoff);
+        cv.put("restaurant", canonicalRestaurant(d.restaurant));
+        cv.put("pickup", cleanCandidate(d.pickup));
+        cv.put("dropoff", cleanCandidate(d.dropoff));
         cv.put("amount", d.amount);
         cv.put("distance_km", d.distanceKm);
         cv.put("duration_min", d.durationMin);
@@ -98,10 +127,166 @@ public class AppDatabase extends SQLiteOpenHelper {
         return id != -1;
     }
 
+    private ExistingDelivery findExistingDelivery(SQLiteDatabase db, ParsedDelivery d) {
+        // Fast exact match first.
+        try (Cursor c = db.rawQuery(
+                "SELECT id,ts,restaurant,pickup,dropoff,duration_min,lat,lon,raw FROM deliveries " +
+                "WHERE platform=? AND ts=? AND ABS(amount-?)<0.021 AND ABS(COALESCE(distance_km,0)-?)<0.051 LIMIT 1",
+                new String[]{d.platform, Long.toString(d.timestampMs), Double.toString(d.amount), Double.toString(d.distanceKm)})) {
+            if (c.moveToFirst()) return existingFromCursor(c);
+        }
+
+        // Uber history can show the same order on several screenshots. A fallback OCR pass can
+        // pick the phone clock or a wrong date, so timestamp/sourceKey alone is not safe enough.
+        if (!"UBER".equalsIgnoreCase(d.platform)) return null;
+        try (Cursor c = db.rawQuery(
+                "SELECT id,ts,restaurant,pickup,dropoff,duration_min,lat,lon,raw FROM deliveries " +
+                "WHERE platform='UBER' AND ABS(amount-?)<0.021 AND ABS(COALESCE(distance_km,0)-?)<0.051 " +
+                "ORDER BY created_ts DESC LIMIT 80",
+                new String[]{Double.toString(d.amount), Double.toString(d.distanceKm)})) {
+            while (c.moveToNext()) {
+                ExistingDelivery e = existingFromCursor(c);
+                if (likelySameUberOrder(e, d)) return e;
+            }
+        }
+        return null;
+    }
+
+    private void mergeIntoExisting(SQLiteDatabase db, ExistingDelivery old, ParsedDelivery d, LocationMatch match) {
+        ContentValues up = new ContentValues();
+        String incomingRestaurant = canonicalRestaurant(d.restaurant);
+        if (isUnknownRestaurant(old.restaurant) && !isUnknownRestaurant(incomingRestaurant)) up.put("restaurant", incomingRestaurant);
+        if (isWeakText(old.pickup) && !isWeakText(d.pickup)) up.put("pickup", cleanCandidate(d.pickup));
+        if (isWeakText(old.dropoff) && !isWeakText(d.dropoff)) up.put("dropoff", cleanCandidate(d.dropoff));
+        if (old.duration <= 0 && d.durationMin > 0) up.put("duration_min", d.durationMin);
+        if ((old.lat == null || old.lon == null) && match != null) {
+            up.put("lat", match.lat); up.put("lon", match.lon); up.put("match_gap_sec", match.gapMs / 1000L);
+        }
+        // Prefer the timestamp from a screenshot that actually contains a visible date.
+        if (!hasExplicitDate(old.raw) && hasExplicitDate(d.raw)) up.put("ts", d.timestampMs);
+        if (d.raw != null && !d.raw.isEmpty() && (old.raw == null || d.raw.length() > old.raw.length())) up.put("raw", d.raw);
+        if (up.size() > 0) db.update("deliveries", up, "id=?", new String[]{Long.toString(old.id)});
+    }
+
+    public int deduplicateUberOrders() {
+        SQLiteDatabase db = getWritableDatabase();
+        ArrayList<ExistingDeliveryFull> rows = new ArrayList<>();
+        try (Cursor c = db.rawQuery(
+                "SELECT id,ts,restaurant,pickup,dropoff,duration_min,lat,lon,raw,amount,distance_km FROM deliveries WHERE platform='UBER' ORDER BY id ASC", null)) {
+            while (c.moveToNext()) {
+                ExistingDelivery e = existingFromCursor(c);
+                rows.add(new ExistingDeliveryFull(e, c.getDouble(9), c.getDouble(10)));
+            }
+        }
+
+        int removed = 0;
+        boolean[] gone = new boolean[rows.size()];
+        for (int i = 0; i < rows.size(); i++) {
+            if (gone[i]) continue;
+            ExistingDeliveryFull keep = rows.get(i);
+            for (int j = i + 1; j < rows.size(); j++) {
+                if (gone[j]) continue;
+                ExistingDeliveryFull other = rows.get(j);
+                if (!likelySameUberRows(keep, other)) continue;
+
+                ContentValues up = new ContentValues();
+                if (isUnknownRestaurant(keep.restaurant) && !isUnknownRestaurant(other.restaurant)) {
+                    keep.restaurant = canonicalRestaurant(other.restaurant); up.put("restaurant", keep.restaurant);
+                }
+                if (isWeakText(keep.pickup) && !isWeakText(other.pickup)) { keep.pickup = cleanCandidate(other.pickup); up.put("pickup", keep.pickup); }
+                if (isWeakText(keep.dropoff) && !isWeakText(other.dropoff)) { keep.dropoff = cleanCandidate(other.dropoff); up.put("dropoff", keep.dropoff); }
+                if (keep.duration <= 0 && other.duration > 0) { keep.duration = other.duration; up.put("duration_min", keep.duration); }
+                if ((keep.lat == null || keep.lon == null) && other.lat != null && other.lon != null) {
+                    keep.lat = other.lat; keep.lon = other.lon; up.put("lat", keep.lat); up.put("lon", keep.lon);
+                }
+                if (!hasExplicitDate(keep.raw) && hasExplicitDate(other.raw)) { keep.ts = other.ts; keep.raw = other.raw; up.put("ts", keep.ts); up.put("raw", keep.raw); }
+                else if ((keep.raw == null || keep.raw.length() < (other.raw == null ? 0 : other.raw.length())) && other.raw != null) {
+                    keep.raw = other.raw; up.put("raw", keep.raw);
+                }
+                if (up.size() > 0) db.update("deliveries", up, "id=?", new String[]{Long.toString(keep.id)});
+                db.delete("deliveries", "id=?", new String[]{Long.toString(other.id)});
+                gone[j] = true;
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    private static boolean likelySameUberOrder(ExistingDelivery e, ParsedDelivery d) {
+        if (Math.abs(e.duration - d.durationMin) <= 0.20 && e.duration > 0 && d.durationMin > 0) {
+            // Exact fare + distance + duration is already a very strong fingerprint. Keep the
+            // date window generous because one screenshot may not show the date at all.
+            return Math.abs(e.ts - d.timestampMs) <= 31L * DAY_MS || minuteOfDayDiff(e.ts, d.timestampMs) <= 5;
+        }
+        return minuteOfDayDiff(e.ts, d.timestampMs) <= 3;
+    }
+
+    private static boolean likelySameUberRows(ExistingDeliveryFull a, ExistingDeliveryFull b) {
+        if (Math.abs(a.amount - b.amount) > 0.021) return false;
+        if (Math.abs(a.distance - b.distance) > 0.051) return false;
+        if (a.duration > 0 && b.duration > 0) {
+            if (Math.abs(a.duration - b.duration) > 0.20) return false;
+            return Math.abs(a.ts - b.ts) <= 31L * DAY_MS || minuteOfDayDiff(a.ts, b.ts) <= 5;
+        }
+        return minuteOfDayDiff(a.ts, b.ts) <= 3;
+    }
+
+    private static long minuteOfDayDiff(long a, long b) {
+        Calendar ca = Calendar.getInstance(); ca.setTimeInMillis(a);
+        Calendar cb = Calendar.getInstance(); cb.setTimeInMillis(b);
+        int ma = ca.get(Calendar.HOUR_OF_DAY) * 60 + ca.get(Calendar.MINUTE);
+        int mb = cb.get(Calendar.HOUR_OF_DAY) * 60 + cb.get(Calendar.MINUTE);
+        int diff = Math.abs(ma - mb);
+        return Math.min(diff, 24 * 60 - diff);
+    }
+
+    private static boolean hasExplicitDate(String raw) {
+        return raw != null && EXPLICIT_DATE.matcher(raw).find();
+    }
+
+    private static String canonicalRestaurant(String s) {
+        if (isUnknownRestaurant(s)) return "Niezidentyfikowano";
+        return s == null ? "Niezidentyfikowano" : s.trim();
+    }
+
+    private static String cleanCandidate(String s) {
+        if (s == null) return "";
+        String n = s.trim();
+        if (isMapCityNoise(n)) return "";
+        return n;
+    }
+
+    private static boolean isWeakText(String s) { return s == null || s.trim().isEmpty() || isMapCityNoise(s); }
+
+    private static boolean isMapCityNoise(String s) {
+        if (s == null) return false;
+        String n = s.trim().toLowerCase(Locale.ROOT);
+        return n.equals("bydgoszcz") || n.equals("bydgoszcz, pl") || n.equals("bydgosz") || n.equals("bydgosz, pl");
+    }
+
+    private static ExistingDelivery existingFromCursor(Cursor c) {
+        ExistingDelivery e = new ExistingDelivery();
+        e.id = c.getLong(0); e.ts = c.getLong(1); e.restaurant = safe(c,2); e.pickup = safe(c,3); e.dropoff = safe(c,4);
+        e.duration = c.isNull(5) ? 0.0 : c.getDouble(5);
+        e.lat = c.isNull(6) ? null : c.getDouble(6); e.lon = c.isNull(7) ? null : c.getDouble(7); e.raw = safe(c,8);
+        return e;
+    }
+
+    private static class ExistingDelivery {
+        long id, ts; String restaurant, pickup, dropoff, raw; double duration; Double lat, lon;
+    }
+    private static class ExistingDeliveryFull extends ExistingDelivery {
+        final double amount, distance;
+        ExistingDeliveryFull(ExistingDelivery e, double amount, double distance) {
+            this.id=e.id; this.ts=e.ts; this.restaurant=e.restaurant; this.pickup=e.pickup; this.dropoff=e.dropoff; this.raw=e.raw;
+            this.duration=e.duration; this.lat=e.lat; this.lon=e.lon; this.amount=amount; this.distance=distance;
+        }
+    }
+
     private static boolean isUnknownRestaurant(String s) {
         if (s == null) return true;
         String n = s.trim().toLowerCase(Locale.ROOT);
-        return n.isEmpty() || n.equals("uber eats") || n.equals("niezidentyfikowano") || n.equals("nieznane");
+        return n.isEmpty() || n.equals("uber eats") || n.equals("niezidentyfikowano") || n.equals("nieznane") || isMapCityNoise(n);
     }
 
     public int countDeliveries() { return scalarInt("SELECT COUNT(*) FROM deliveries"); }
@@ -155,13 +340,16 @@ public class AppDatabase extends SQLiteOpenHelper {
         return arr.toString();
     }
 
-    public String getStatusJson(boolean tracking) {
+    public String getStatusJson(boolean serviceRunning, boolean trackingRequested) {
         JSONObject o = new JSONObject();
         try {
-            o.put("tracking", tracking);
+            o.put("tracking", trackingRequested);
+            o.put("serviceRunning", serviceRunning);
             o.put("deliveryCount", countDeliveries());
             o.put("locationCount", countLocations());
             o.put("unmatchedCount", countUnmatchedDeliveries());
+            o.put("activeShiftStartTs", getActiveShiftStartTs());
+            o.put("lastGpsTs", getLastLocationTsForActiveShift());
         } catch (JSONException ignored) {}
         return o.toString();
     }

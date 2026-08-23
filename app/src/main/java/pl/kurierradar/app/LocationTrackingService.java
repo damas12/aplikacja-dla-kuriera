@@ -12,11 +12,21 @@ public class LocationTrackingService extends Service implements LocationListener
     public static final String ACTION_STOP = "pl.kurierradar.app.STOP_TRACKING";
     private static final String CHANNEL_ID = "tracking";
     private static final int NOTIF_ID = 1001;
+    private static final String PREFS = "tracking_state";
+    private static final String KEY_REQUESTED = "tracking_requested";
     public static volatile boolean isRunning = false;
 
     private LocationManager locationManager;
     private AppDatabase db;
     private long shiftId = -1;
+
+    public static boolean isTrackingRequested(Context context) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_REQUESTED, false);
+    }
+
+    private static void setTrackingRequested(Context context, boolean value) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_REQUESTED, value).apply();
+    }
 
     @Override public void onCreate() {
         super.onCreate();
@@ -26,16 +36,27 @@ public class LocationTrackingService extends Service implements LocationListener
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? ACTION_START : intent.getAction();
+        String action = intent == null ? null : intent.getAction();
+
         if (ACTION_STOP.equals(action)) {
-            stopTrackingAndSelf();
+            setTrackingRequested(this, false);
+            stopTrackingAndSelf(true);
+            return START_NOT_STICKY;
+        }
+
+        if (ACTION_START.equals(action)) setTrackingRequested(this, true);
+
+        // START_STICKY can recreate the service with a null Intent. Resume only when the user
+        // had an active shift before Android/MIUI killed the process.
+        if (!isTrackingRequested(this)) {
+            stopSelf();
             return START_NOT_STICKY;
         }
 
         if (!isRunning) {
             isRunning = true;
-            shiftId = db.startShift();
             startForeground(NOTIF_ID, buildNotification("Zapisuję trasę GPS…"));
+            shiftId = db.getOrStartActiveShift();
             requestUpdates();
         }
         return START_STICKY;
@@ -44,7 +65,8 @@ public class LocationTrackingService extends Service implements LocationListener
     private void requestUpdates() {
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
                 && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            stopTrackingAndSelf();
+            setTrackingRequested(this, false);
+            stopTrackingAndSelf(true);
             return;
         }
         try {
@@ -69,9 +91,10 @@ public class LocationTrackingService extends Service implements LocationListener
     @Override public void onProviderDisabled(String provider) {}
     @Deprecated @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
 
-    private void stopTrackingAndSelf() {
+    private void stopTrackingAndSelf(boolean closeShift) {
         try { if (locationManager != null) locationManager.removeUpdates(this); } catch (Exception ignored) {}
-        if (db != null) db.endOpenShift();
+        if (closeShift && db != null) db.endActiveShift(shiftId);
+        shiftId = -1;
         isRunning = false;
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -79,7 +102,8 @@ public class LocationTrackingService extends Service implements LocationListener
 
     @Override public void onDestroy() {
         try { if (locationManager != null) locationManager.removeUpdates(this); } catch (Exception ignored) {}
-        if (isRunning && db != null) db.endOpenShift();
+        // Do NOT close the shift here. Android/MIUI may destroy the service temporarily.
+        // The open shift + persistent tracking flag let START_STICKY or the app resume it.
         isRunning = false;
         super.onDestroy();
     }

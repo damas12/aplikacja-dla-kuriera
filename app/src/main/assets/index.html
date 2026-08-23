@@ -117,7 +117,7 @@
     </section>
 
     <section id="history" class="page">
-      <div class="card"><div class="row between"><div class="title">Historia</div><button id="exportBtn" class="ghost">Eksport CSV</button></div><div id="historyList"></div></div>
+      <div class="card"><div class="row between"><div class="title">Historia</div><button id="exportBtn" class="ghost">Eksport CSV</button></div><div id="historyList"></div><button id="historyMoreBtn" class="ghost" style="width:100%;margin-top:12px;display:none">Pokaż więcej</button></div>
       <div class="card"><div class="title">Ustawienia i prywatność</div><p class="privacy">Dostawy, OCR i historia GPS są przechowywane lokalnie na tym telefonie. Kurier Radar nie wysyła Twojej bazy na serwer. Mapa pobiera publiczne kafelki OpenStreetMap, więc do jej wyświetlenia potrzebny jest internet.</p><div class="row"><button id="batteryBtn" class="secondary">⚙ Ustawienia baterii</button><button id="clearBtn" class="danger">Usuń całą bazę</button></div><p class="small muted">Na Xiaomi ustaw dla Kurier Radar: oszczędzanie baterii → Bez ograniczeń, żeby GPS nie był ubijany w tle.</p></div>
     </section>
   </main>
@@ -136,6 +136,7 @@
 'use strict';
 let deliveries=[]; let shifts=[]; let status={tracking:false,locationCount:0,deliveryCount:0,unmatchedCount:0};
 let map=null, heat=null, markers=null; let preferredHomeDay=null;
+let historyVisibleCount=30;
 const $=id=>document.getElementById(id);
 const money=n=>(Number(n)||0).toLocaleString('pl-PL',{minimumFractionDigits:2,maximumFractionDigits:2})+' zł';
 const num=(n,d=1)=>(Number(n)||0).toLocaleString('pl-PL',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -305,7 +306,17 @@ window.onNativeImportResult=r=>{
 
 function renderStatus(){
   $('gpsDot').classList.toggle('on',!!status.tracking);
-  $('gpsText').textContent=status.tracking?'GPS aktywny – zmiana trwa':'GPS wyłączony';
+  let label='GPS wyłączony';
+  if(status.tracking){
+    const last=+status.lastGpsTs||0;
+    const age=last?Math.max(0,Date.now()-last):0;
+    if(!status.serviceRunning) label='Wznawiam śledzenie…';
+    else if(!last) label='GPS aktywny – czekam na pierwszy punkt';
+    else if(age<=45000) label=`GPS OK · ostatni punkt ${Math.max(1,Math.round(age/1000))} s temu`;
+    else if(age<=120000) label=`GPS aktywny · ostatni punkt ${Math.max(1,Math.round(age/60000))} min temu`;
+    else label=`⚠ brak GPS od ${Math.max(2,Math.round(age/60000))} min`;
+  }
+  $('gpsText').textContent=label;
   $('gpsPoints').textContent=(status.locationCount||0)+' punktów';
   $('startBtn').style.display=status.tracking?'none':'inline-block';
   $('stopBtn').style.display=status.tracking?'inline-block':'none';
@@ -434,13 +445,26 @@ function renderRestaurants(){
   $('restaurantRows').innerHTML=rows.length?rows.map(([n,x])=>`<tr><td><b>${escapeHtml(n)}</b>${n==='Niezidentyfikowano'?'<div class="small muted">dodaj później screen z nazwą — rekord zostanie uzupełniony</div>':''}</td><td>${x.n}</td><td>${money(x.avg)}</td><td>${num(x.zpk,2)}</td><td>${x.timeN>0?num(x.avgMin,1):'—'}</td><td><b>${x.timeN>0?money(x.zph)+'/h':'—'}</b>${x.timeN>0&&x.timeN<x.n?`<div class="small muted">${x.timeN}/${x.n} z czasem</div>`:''}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">Brak danych</td></tr>';
 }
 function renderHistory(){
-  const list=$('historyList'); if(!deliveries.length){list.innerHTML='<div class="empty">Nie zaimportowano jeszcze żadnych zleceń.</div>';return}
-  list.innerHTML=deliveries.slice(0,150).map(d=>{
+  const list=$('historyList');
+  const more=$('historyMoreBtn');
+  if(!deliveries.length){
+    list.innerHTML='<div class="empty">Nie zaimportowano jeszcze żadnych zleceń.</div>';
+    if(more)more.style.display='none';
+    return;
+  }
+
+  const visible=deliveries.slice(0,historyVisibleCount);
+  list.innerHTML=visible.map(d=>{
     const dt=dateObj(d.ts);
     const perKm=zpk(d);
     const perKmText=perKm>0?`${num(perKm,2)} zł/km`:'— zł/km';
     return `<div class="historyItem"><div class="row between"><div class="grow"><span class="platform ${d.platform}">${d.platform}</span> <b>${escapeHtml(normalizeRestaurantName(d))}</b><div class="small muted">${dt.toLocaleDateString('pl-PL')} ${dt.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'})} · ${num(d.distanceKm,2)} km${d.lat==null?' · brak GPS':''}</div></div><div style="text-align:right;min-width:92px"><div class="badge green" style="margin-bottom:5px">${perKmText}</div><div class="money">${money(d.amount)}</div></div></div></div>`
   }).join('');
+
+  if(more){
+    more.style.display=deliveries.length>historyVisibleCount?'block':'none';
+    more.textContent='Pokaż więcej';
+  }
 }
 function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 function renderEverything(){populateMonthFilters();populateDaySelectors();renderStatus();renderSummary();renderDaySummary();renderMap();renderHourGrid();renderDailyAnalysis();renderMonthTable();renderRestaurants();renderHistory()}
@@ -450,6 +474,7 @@ $('startBtn').addEventListener('click',()=>hasAndroid()?Android.startTracking():
 $('stopBtn').addEventListener('click',()=>hasAndroid()&&Android.stopTracking());
 $('importBtn').addEventListener('click',()=>hasAndroid()?Android.pickScreenshots($('platformHint').value):alert('Import OCR działa w aplikacji Android.'));
 $('exportBtn').addEventListener('click',()=>hasAndroid()&&Android.exportCsv());
+$('historyMoreBtn').addEventListener('click',()=>{historyVisibleCount+=30;renderHistory();});
 $('batteryBtn').addEventListener('click',()=>hasAndroid()&&Android.openBatterySettings());
 $('clearBtn').addEventListener('click',()=>{if(confirm('Usunąć wszystkie dostawy i historię GPS? Tego nie da się cofnąć.')){hasAndroid()&&Android.clearAll()}});
 ['fPlatform','fDay','fMonth','fHour','fMetric'].forEach(id=>$(id).addEventListener('change',renderMap));
