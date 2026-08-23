@@ -177,8 +177,12 @@ public final class DeliveryLayoutParser {
         for (int i = 0; i < starts.size(); i++) {
             UberCardStart s = starts.get(i);
             int startY = Math.max(0, Math.min(s.amount.box.top, s.time.box.top) - 12);
+            // A full Uber card is tall because the route map sits between the fare row and
+            // the pickup/drop-off lines. Using the midpoint to the next fare row cut the card
+            // inside the map and hid the restaurant name. Keep the whole card up to just before
+            // the next order starts.
             int endY = i + 1 < starts.size()
-                    ? Math.max(startY + 80, (s.amount.box.centerY() + starts.get(i + 1).amount.box.centerY()) / 2)
+                    ? Math.max(startY + 120, starts.get(i + 1).amount.box.top - 8)
                     : maxBottom(lines) + 20;
 
             OcrLine deliveryLine = null;
@@ -200,12 +204,21 @@ public final class DeliveryLayoutParser {
             LocalTime time = parseTime(s.time.text);
             if (time == null) continue;
 
-            // Locate the first delivery address below the map; then use the nearest sensible line above it as pickup.
+            // Locate the text below the route map. Uber renders "Google / Map data" at the
+            // bottom of the map, so when OCR sees that footer we ignore every map label above it.
+            // This prevents labels such as BYDGOSZCZ / SKRZETUSKO from becoming restaurant names.
+            int contentFloorY = deliveryLine.box.bottom;
+            for (OcrLine l : lines) {
+                int cy = l.box.centerY();
+                if (cy <= deliveryLine.box.bottom || cy >= endY) continue;
+                if (isUberMapFooter(l.text)) contentFloorY = Math.max(contentFloorY, l.box.bottom + 2);
+            }
+
             OcrLine addressLine = null;
             List<OcrLine> candidates = new ArrayList<>();
             for (OcrLine l : lines) {
                 int cy = l.box.centerY();
-                if (cy <= deliveryLine.box.bottom || cy >= endY) continue;
+                if (cy <= contentFloorY || cy >= endY) continue;
                 if (isUberNoise(l.text) || AMOUNT.matcher(l.text).find() || TIME.matcher(l.text).find()) continue;
                 if (looksLikeAddress(l.text)) {
                     if (addressLine == null) addressLine = l;
@@ -298,6 +311,11 @@ public final class DeliveryLayoutParser {
                 || n.matches(".*\\d{1,2}\\.\\d{2}[-–]\\d{1,2}\\.\\d{2}.*")
                 || n.matches("(?i).*(pon|wt|śr|sr|czw|pt|sob|nd)\\.?[, ]+\\d{1,2}\\s+(sty|lut|mar|kwi|maj|cze|lip|sie|wrz|paź|paz|lis|gru).*")
                 || n.matches("(?i)^\\d{1,2}\\s+(sty|lut|mar|kwi|maj|cze|lip|sie|wrz|paź|paz|lis|gru)(?:\\s+\\d{4})?$");
+    }
+
+    private static boolean isUberMapFooter(String s) {
+        String l = normalize(s).trim().toLowerCase(Locale.ROOT);
+        return l.equals("google") || l.startsWith("map data") || l.contains("map data ©") || l.contains("map data (c)");
     }
 
     private static boolean isUberNoise(String s) {

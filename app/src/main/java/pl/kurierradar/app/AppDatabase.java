@@ -155,7 +155,7 @@ public class AppDatabase extends SQLiteOpenHelper {
     private void mergeIntoExisting(SQLiteDatabase db, ExistingDelivery old, ParsedDelivery d, LocationMatch match) {
         ContentValues up = new ContentValues();
         String incomingRestaurant = canonicalRestaurant(d.restaurant);
-        if (isUnknownRestaurant(old.restaurant) && !isUnknownRestaurant(incomingRestaurant)) up.put("restaurant", incomingRestaurant);
+        if (isWeakRestaurant(old.restaurant) && !isWeakRestaurant(incomingRestaurant)) up.put("restaurant", incomingRestaurant);
         if (isWeakText(old.pickup) && !isWeakText(d.pickup)) up.put("pickup", cleanCandidate(d.pickup));
         if (isWeakText(old.dropoff) && !isWeakText(d.dropoff)) up.put("dropoff", cleanCandidate(d.dropoff));
         if (old.duration <= 0 && d.durationMin > 0) up.put("duration_min", d.durationMin);
@@ -190,7 +190,7 @@ public class AppDatabase extends SQLiteOpenHelper {
                 if (!likelySameUberRows(keep, other)) continue;
 
                 ContentValues up = new ContentValues();
-                if (isUnknownRestaurant(keep.restaurant) && !isUnknownRestaurant(other.restaurant)) {
+                if (isWeakRestaurant(keep.restaurant) && !isWeakRestaurant(other.restaurant)) {
                     keep.restaurant = canonicalRestaurant(other.restaurant); up.put("restaurant", keep.restaurant);
                 }
                 if (isWeakText(keep.pickup) && !isWeakText(other.pickup)) { keep.pickup = cleanCandidate(other.pickup); up.put("pickup", keep.pickup); }
@@ -252,16 +252,35 @@ public class AppDatabase extends SQLiteOpenHelper {
     private static String cleanCandidate(String s) {
         if (s == null) return "";
         String n = s.trim();
-        if (isMapCityNoise(n)) return "";
+        if (isMapLabelNoise(n)) return "";
         return n;
     }
 
-    private static boolean isWeakText(String s) { return s == null || s.trim().isEmpty() || isMapCityNoise(s); }
+    private static boolean isWeakRestaurant(String s) {
+        return isUnknownRestaurant(s) || isMapLabelNoise(s);
+    }
+
+    private static boolean isWeakText(String s) {
+        return s == null || s.trim().isEmpty() || isMapLabelNoise(s);
+    }
 
     private static boolean isMapCityNoise(String s) {
         if (s == null) return false;
         String n = s.trim().toLowerCase(Locale.ROOT);
         return n.equals("bydgoszcz") || n.equals("bydgoszcz, pl") || n.equals("bydgosz") || n.equals("bydgosz, pl");
+    }
+
+    private static boolean isMapLabelNoise(String s) {
+        if (s == null) return false;
+        String n = s.trim().toLowerCase(Locale.ROOT);
+        if (isMapCityNoise(n)) return true;
+        // Common Bydgoszcz district labels visible on Uber's embedded route map.
+        // They are not pickup names and may be OCR'd with broken casing/spaces.
+        String compact = n.replaceAll("[^a-ząćęłńóśźż]", "");
+        return compact.contains("skrzetusko") || compact.contains("bartodzieje")
+                || compact.contains("bielawy") || compact.contains("srodmiescie") || compact.contains("śródmieście")
+                || compact.contains("szwederowo") || compact.contains("wyzyny") || compact.contains("wyżyny")
+                || compact.contains("legnowo") || compact.contains("łęgnowo");
     }
 
     private static ExistingDelivery existingFromCursor(Cursor c) {

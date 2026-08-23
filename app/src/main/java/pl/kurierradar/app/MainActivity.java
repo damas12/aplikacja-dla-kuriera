@@ -212,7 +212,7 @@ public class MainActivity extends Activity {
             db.clearAll();
             sendToWeb("window.refreshAll && window.refreshAll();");
         }
-        @JavascriptInterface public String appVersion() { return "1.0.0"; }
+        @JavascriptInterface public String appVersion() { return "1.1.0"; }
     }
 
     private static class ImportSummary {
