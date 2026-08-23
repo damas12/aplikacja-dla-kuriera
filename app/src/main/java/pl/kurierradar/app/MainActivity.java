@@ -37,6 +37,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         db = new AppDatabase(this);
         db.deduplicateUberOrders();
+        db.reconcileRestaurantAliases();
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
 
         webView = new WebView(this);
@@ -141,6 +142,7 @@ public class MainActivity extends Activity {
     private void processScreenshots(List<Uri> uris, int index, ImportSummary summary) {
         if (index >= uris.size()) {
             db.deduplicateUberOrders();
+            db.reconcileRestaurantAliases();
             summary.unmatched = db.countUnmatchedDeliveries();
             JSONObject o = summary.toJson();
             sendToWeb("window.onNativeImportResult && window.onNativeImportResult(" + o.toString() + ");");
@@ -212,7 +214,7 @@ public class MainActivity extends Activity {
             db.clearAll();
             sendToWeb("window.refreshAll && window.refreshAll();");
         }
-        @JavascriptInterface public String appVersion() { return "1.1.0"; }
+        @JavascriptInterface public String appVersion() { return "1.2.0"; }
     }
 
     private static class ImportSummary {

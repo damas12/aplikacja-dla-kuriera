@@ -106,11 +106,13 @@ public class AppDatabase extends SQLiteOpenHelper {
             return false;
         }
 
+        String normalizedRestaurant = normalizeKnownRestaurantAlias(db, d.restaurant);
         ContentValues cv = new ContentValues();
         cv.put("platform", d.platform);
         cv.put("ts", d.timestampMs);
-        cv.put("restaurant", canonicalRestaurant(d.restaurant));
-        cv.put("pickup", cleanCandidate(d.pickup));
+        cv.put("restaurant", normalizedRestaurant);
+        String normalizedPickup = normalizePickupAgainstRestaurant(db, d.pickup, normalizedRestaurant);
+        cv.put("pickup", normalizedPickup);
         cv.put("dropoff", cleanCandidate(d.dropoff));
         cv.put("amount", d.amount);
         cv.put("distance_km", d.distanceKm);
@@ -154,9 +156,22 @@ public class AppDatabase extends SQLiteOpenHelper {
 
     private void mergeIntoExisting(SQLiteDatabase db, ExistingDelivery old, ParsedDelivery d, LocationMatch match) {
         ContentValues up = new ContentValues();
-        String incomingRestaurant = canonicalRestaurant(d.restaurant);
-        if (isWeakRestaurant(old.restaurant) && !isWeakRestaurant(incomingRestaurant)) up.put("restaurant", incomingRestaurant);
-        if (isWeakText(old.pickup) && !isWeakText(d.pickup)) up.put("pickup", cleanCandidate(d.pickup));
+        String oldRestaurant = normalizeKnownRestaurantAlias(db, old.restaurant);
+        String incomingRestaurant = normalizeKnownRestaurantAlias(db, d.restaurant);
+        if (!sameText(old.restaurant, oldRestaurant)) {
+            up.put("restaurant", oldRestaurant);
+        } else if (isWeakRestaurant(old.restaurant) && !isWeakRestaurant(incomingRestaurant)) {
+            up.put("restaurant", incomingRestaurant);
+        } else if (!sameText(old.restaurant, incomingRestaurant)
+                && sameRestaurantIgnoringSafeLeadingArtifact(old.restaurant, incomingRestaurant)) {
+            up.put("restaurant", preferredRestaurantName(old.restaurant, incomingRestaurant));
+        }
+        String incomingPickup = normalizePickupAgainstRestaurant(db, d.pickup, incomingRestaurant);
+        if (isWeakText(old.pickup) && !isWeakText(incomingPickup)) up.put("pickup", incomingPickup);
+        else {
+            String oldPickupNormalized = normalizePickupAgainstRestaurant(db, old.pickup, oldRestaurant);
+            if (!sameText(old.pickup, oldPickupNormalized)) up.put("pickup", oldPickupNormalized);
+        }
         if (isWeakText(old.dropoff) && !isWeakText(d.dropoff)) up.put("dropoff", cleanCandidate(d.dropoff));
         if (old.duration <= 0 && d.durationMin > 0) up.put("duration_min", d.durationMin);
         if ((old.lat == null || old.lon == null) && match != null) {
@@ -166,6 +181,131 @@ public class AppDatabase extends SQLiteOpenHelper {
         if (!hasExplicitDate(old.raw) && hasExplicitDate(d.raw)) up.put("ts", d.timestampMs);
         if (d.raw != null && !d.raw.isEmpty() && (old.raw == null || d.raw.length() > old.raw.length())) up.put("raw", d.raw);
         if (up.size() > 0) db.update("deliveries", up, "id=?", new String[]{Long.toString(old.id)});
+    }
+
+
+    /**
+     * Very conservative OCR alias cleanup.
+     *
+     * We never strip a leading number/symbol just because it "looks wrong".
+     * A name is changed only when the exact remainder already exists in this
+     * database as a restaurant name. Example:
+     *   "9 Popeyes (Bydgoszcz Focus)" -> "Popeyes (Bydgoszcz Focus)"
+     * only if "Popeyes (Bydgoszcz Focus)" is already known.
+     *
+     * This protects legitimate names such as "7 Street" when there is no exact
+     * clean counterpart "Street" already present.
+     */
+    public int reconcileRestaurantAliases() {
+        SQLiteDatabase db = getWritableDatabase();
+        ArrayList<String> names = new ArrayList<>();
+        try (Cursor c = db.rawQuery(
+                "SELECT DISTINCT restaurant FROM deliveries WHERE restaurant IS NOT NULL AND TRIM(restaurant)<>''", null)) {
+            while (c.moveToNext()) {
+                String n = safe(c, 0).trim();
+                if (!isWeakRestaurant(n)) names.add(n);
+            }
+        }
+
+        int updated = 0;
+        for (String noisy : names) {
+            String remainder = safeLeadingArtifactRemainder(noisy);
+            if (remainder == null) continue;
+
+            String clean = findExactKnownName(names, remainder);
+            if (clean == null || sameText(noisy, clean)) continue;
+
+            ContentValues upRestaurant = new ContentValues();
+            upRestaurant.put("restaurant", clean);
+            updated += db.update("deliveries", upRestaurant, "restaurant=?", new String[]{noisy});
+
+            // Pickup often contains the same OCR text as restaurant. Only replace it
+            // when it is exactly the same noisy alias.
+            ContentValues upPickup = new ContentValues();
+            upPickup.put("pickup", clean);
+            db.update("deliveries", upPickup, "pickup=?", new String[]{noisy});
+        }
+        return updated;
+    }
+
+    private static String normalizeKnownRestaurantAlias(SQLiteDatabase db, String value) {
+        String n = canonicalRestaurant(value);
+        if (isWeakRestaurant(n)) return n;
+
+        String remainder = safeLeadingArtifactRemainder(n);
+        if (remainder == null) return n;
+
+        try (Cursor c = db.rawQuery(
+                "SELECT restaurant FROM deliveries WHERE LOWER(TRIM(restaurant))=LOWER(TRIM(?)) LIMIT 1",
+                new String[]{remainder})) {
+            if (c.moveToFirst()) {
+                String known = safe(c, 0).trim();
+                if (!known.isEmpty() && !isWeakRestaurant(known)) return known;
+            }
+        }
+        return n;
+    }
+
+    private static String normalizePickupAgainstRestaurant(SQLiteDatabase db, String pickup, String normalizedRestaurant) {
+        String p = cleanCandidate(pickup);
+        if (p.isEmpty()) return p;
+        String normalized = normalizeKnownRestaurantAlias(db, p);
+        if (!isWeakRestaurant(normalizedRestaurant)
+                && sameRestaurantIgnoringSafeLeadingArtifact(normalized, normalizedRestaurant)) {
+            return normalizedRestaurant;
+        }
+        return normalized;
+    }
+
+    private static boolean sameRestaurantIgnoringSafeLeadingArtifact(String a, String b) {
+        if (sameText(a, b)) return true;
+        String ar = safeLeadingArtifactRemainder(a);
+        if (ar != null && sameText(ar, b)) return true;
+        String br = safeLeadingArtifactRemainder(b);
+        return br != null && sameText(a, br);
+    }
+
+    private static String preferredRestaurantName(String a, String b) {
+        String ar = safeLeadingArtifactRemainder(a);
+        if (ar != null && sameText(ar, b)) return b == null ? "" : b.trim();
+        String br = safeLeadingArtifactRemainder(b);
+        if (br != null && sameText(a, br)) return a == null ? "" : a.trim();
+        return b == null ? canonicalRestaurant(a) : canonicalRestaurant(b);
+    }
+
+    /**
+     * Returns the name after one suspicious one-character prefix, or null.
+     * The prefix must contain no letters and must be a separate token.
+     * Nothing is removed unless the caller also proves the remainder already
+     * exists as an exact known restaurant name.
+     */
+    private static String safeLeadingArtifactRemainder(String s) {
+        if (s == null) return null;
+        String n = s.trim();
+        int space = n.indexOf(' ');
+        if (space <= 0 || space >= n.length() - 1) return null;
+
+        String first = n.substring(0, space).trim();
+        if (first.codePointCount(0, first.length()) != 1) return null;
+
+        int cp = first.codePointAt(0);
+        if (Character.isLetter(cp)) return null;
+
+        String rest = n.substring(space + 1).trim();
+        // Require a reasonably specific remainder to reduce accidental matches.
+        if (rest.length() < 8 || rest.indexOf(' ') < 0) return null;
+        return rest;
+    }
+
+    private static String findExactKnownName(List<String> names, String target) {
+        if (target == null) return null;
+        for (String n : names) if (sameText(n, target)) return n.trim();
+        return null;
+    }
+
+    private static boolean sameText(String a, String b) {
+        if (a == null || b == null) return a == b;
+        return a.trim().equalsIgnoreCase(b.trim());
     }
 
     public int deduplicateUberOrders() {
